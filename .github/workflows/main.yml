@@ -1,0 +1,132 @@
+name: Build project
+
+on:
+  push:
+    branches:
+      - master     # 当代码合并到 main 分支（或直接 push 到 main 时）触发
+    tags:
+      - '*'      # 当推送任意 Tag 时触发（必须保留这个，否则你前面的发版功能就不生效了）
+
+jobs:
+  buildForAllSupportedPlatforms:
+    name: Build for ${{ matrix.targetPlatform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        targetPlatform:
+          - StandaloneWindows64 # Build a Windows 64-bit standalone.
+          - StandaloneLinux64 # Build a Linux 64-bit standalone.
+          - WebGL # WebGL.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/cache@v3
+        with:
+          path: Library
+          key: Library-${{ matrix.targetPlatform }}
+          restore-keys: Library-
+      - if: matrix.targetPlatform == 'Android'
+        uses: jlumbroso/free-disk-space@v1.3.1
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: ${{ matrix.targetPlatform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Build-${{ matrix.targetPlatform }}
+          path: build/${{ matrix.targetPlatform }}
+
+  deployPages:
+    name: Deploy WebGL to GitHub Pages
+    # 必须等待构建任务完成
+    needs: buildForAllSupportedPlatforms
+    # 仅当推送到默认分支(如 main)时才执行部署，防止 Pull Request 覆盖线上版本
+    # 如果你的默认分支叫 master，请把 main 改成 master
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      # 1. 下载前一个 Job 产出的 WebGL 构建包
+      - name: Download WebGL Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Build-WebGL
+          path: build/WebGL
+
+      # 2. 配置 GitHub Pages 环境
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      # 3. 将下载的 WebGL 文件打包为 Pages 专用的 artifact
+      - name: Upload artifact for Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # 指向包含 index.html 的文件夹路径
+          path: build/WebGL/WebGL
+
+      # 4. 执行最终部署
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  createRelease:
+    name: Create GitHub Release
+    # 必须等待构建任务成功完成
+    needs: buildForAllSupportedPlatforms
+    # 核心判断：只有当触发本次 Action 的是一个 Tag (例如 refs/tags/v1.0.0) 时，才执行此任务
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    # 创建 Release 需要仓库的写入权限
+    permissions:
+      contents: write
+
+    steps:
+      # 1. 一次性下载前一个 Job 产出的所有平台的构建包
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded_builds
+
+      # 2. 将各个文件夹压缩成单一文件 (GitHub Release 只能上传单个文件，不能直接传文件夹)
+      - name: Zip builds
+        run: |
+          cd downloaded_builds
+
+          # 压缩 Windows 版
+          if [ -d "Build-StandaloneWindows64" ]; then
+            zip -r ../Windows-Build.zip Build-StandaloneWindows64/
+          fi
+
+          # 压缩 Linux 版 (Linux 下习惯使用 tar.gz)
+          if [ -d "StandaloneLinux64" ] || [ -d "Build-StandaloneLinux64" ]; then
+            tar -czvf ../Linux-Build.tar.gz Build-StandaloneLinux64/
+          fi
+
+          # 压缩 WebGL 版 (供玩家离线下载使用)
+          if [ -d "Build-WebGL" ]; then
+            zip -r ../WebGL-Build.zip Build-WebGL/
+          fi
+
+      # 3. 创建 Release 页面，并把刚刚压缩的三个包附加上去
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true # 自动把这次 Tag 包含的 commit 写进更新日志
+          files: |
+            Windows-Build.zip
+            Linux-Build.tar.gz
+            WebGL-Build.zip
