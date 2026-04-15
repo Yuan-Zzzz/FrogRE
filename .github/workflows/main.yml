@@ -2,10 +2,8 @@ name: Build project
 
 on:
   push:
-    branches:
-      - master     # 当代码合并到 main 分支（或直接 push 到 main 时）触发
     tags:
-      - '*'      # 当推送任意 Tag 时触发（必须保留这个，否则你前面的发版功能就不生效了）
+      - '*'      # 仅当推送 Tag 时触发（普通分支 push 不触发编译）
 
 jobs:
   buildForAllSupportedPlatforms:
